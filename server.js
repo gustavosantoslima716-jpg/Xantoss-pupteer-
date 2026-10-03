@@ -11,36 +11,54 @@ app.get("/", (req, res) => {
   });
 });
 
-app.get("/browser-test", async (req, res) => {
+app.get("/quizit-test", async (req, res) => {
   let browser;
 
   try {
     browser = await puppeteer.launch({
       headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"]
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox"
+      ]
     });
 
     const page = await browser.newPage();
 
-    await page.goto("https://example.com", {
-      waitUntil: "domcontentloaded",
-      timeout: 30000
+    await page.goto("https://quizit.online/services/wayground", {
+      waitUntil: "networkidle2",
+      timeout: 60000
     });
 
-    const title = await page.title();
+    const resultado = await page.evaluate(() => {
+      const input = document.querySelector("input");
+      const selects = [...document.querySelectorAll("select")];
+
+      return {
+        title: document.title,
+        url: location.href,
+        inputEncontrado: !!input,
+        placeholder: input?.placeholder || null,
+        selectsEncontrados: selects.length,
+        textoPagina: document.body.innerText.slice(0, 1500)
+      };
+    });
 
     res.json({
       success: true,
-      chromium: "Funcionando",
-      title
+      ...resultado
     });
+
   } catch (error) {
     res.status(500).json({
       success: false,
       error: error.message
     });
+
   } finally {
-    if (browser) await browser.close();
+    if (browser) {
+      await browser.close();
+    }
   }
 });
 
