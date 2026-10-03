@@ -1,27 +1,20 @@
 import express from "express";
 import puppeteer from "puppeteer";
-import crypto from "crypto";
 
 const app = express();
-app.use(express.json());
 
-const sessions = new Map();
+app.use(express.json({ limit: "2mb" }));
 
-const SESSION_TTL = 10 * 60 * 1000;
-
-// ===============================
 // CORS
-// ===============================
-
 app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "*");
-  res.header(
-    "Access-Control-Allow-Headers",
-    "Content-Type"
-  );
-  res.header(
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader(
     "Access-Control-Allow-Methods",
     "GET, POST, OPTIONS"
+  );
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type"
   );
 
   if (req.method === "OPTIONS") {
@@ -31,39 +24,101 @@ app.use((req, res, next) => {
   next();
 });
 
-// ===============================
+// ==============================
 // HOME
-// ===============================
+// ==============================
 
 app.get("/", (req, res) => {
   res.json({
-    status: "online",
-    service: "Xantoss Puppeteer"
+    success: true,
+    service: "Xantoss Puppeteer",
+    status: "online"
   });
 });
 
-// ===============================
-// FECHAR SESSÃO
-// ===============================
+// ==============================
+// TESTE DO CHROMIUM
+// ==============================
 
-async function closeSession(sessionId) {
-  const session = sessions.get(sessionId);
-
-  if (!session) return;
-
-  sessions.delete(sessionId);
+app.get("/browser-test", async (req, res) => {
+  let browser;
 
   try {
-    clearTimeout(session.timer);
-    await session.browser.close();
-  } catch {}
-}
+    browser = await puppeteer.launch({
+      headless: true,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage"
+      ]
+    });
 
-// ===============================
-// INICIAR LOGIN GOOGLE
-// ===============================
+    const page = await browser.newPage();
 
-app.post("/quizit/google/start", async (req, res) => {
+    await page.goto("https://example.com", {
+      waitUntil: "domcontentloaded",
+      timeout: 30000
+    });
+
+    const title = await page.title();
+
+    return res.json({
+      success: true,
+      chromium: "Funcionando",
+      title
+    });
+
+  } catch (error) {
+    console.error("Browser test error:", error);
+
+    return res.status(500).json({
+      success: false,
+      error: error.message
+    });
+
+  } finally {
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
+  }
+});
+
+// ==============================
+// WAYGROUND INSPECT
+// ==============================
+
+app.post("/wayground/inspect", async (req, res) => {
+  const { url } = req.body || {};
+
+  if (!url) {
+    return res.status(400).json({
+      success: false,
+      error: "Envie o campo url"
+    });
+  }
+
+  let parsed;
+
+  try {
+    parsed = new URL(url);
+  } catch {
+    return res.status(400).json({
+      success: false,
+      error: "URL inválida"
+    });
+  }
+
+  // Permite somente Wayground
+  if (
+    parsed.hostname !== "wayground.com" &&
+    !parsed.hostname.endsWith(".wayground.com")
+  ) {
+    return res.status(400).json({
+      success: false,
+      error: "Somente links do Wayground são permitidos"
+    });
+  }
+
   let browser;
 
   try {
@@ -80,209 +135,250 @@ app.post("/quizit/google/start", async (req, res) => {
     const page = await browser.newPage();
 
     await page.setViewport({
-      width: 1280,
-      height: 900
+      width: 1365,
+      height: 768
     });
 
-    // Abre login do Quizit
-    await page.goto(
-      "https://quizit.online/auth/login?next=/services/wayground",
-      {
-        waitUntil: "networkidle2",
-        timeout: 60000
-      }
+    // User-Agent normal
+    await page.setUserAgent(
+      "Mozilla/5.0 (X11; Linux x86_64) " +
+      "AppleWebKit/537.36 (KHTML, like Gecko) " +
+      "Chrome/140.0.0.0 Safari/537.36"
     );
 
-    // Procura botão Google
-    const clicked = await page.evaluate(() => {
-      const elements = [
-        ...document.querySelectorAll(
-          "button, a, [role='button']"
-        )
-      ];
+    const responses = [];
+    const possibleData = [];
 
-      const googleButton = elements.find(el =>
-        (el.innerText || "")
-          .trim()
-          .toLowerCase()
-          .includes("log in with google")
-      );
+    // ==============================
+    // OBSERVA RESPOSTAS DE REDE
+    // ==============================
 
-      if (!googleButton) {
-        return false;
-      }
-
-      googleButton.click();
-
-      return true;
-    });
-
-    if (!clicked) {
-      throw new Error(
-        'Botão "Log in with Google" não encontrado.'
-      );
-    }
-
-    // Espera Google abrir
-    await new Promise(resolve =>
-      setTimeout(resolve, 4000)
-    );
-
-    const pages = await browser.pages();
-
-    const googlePage = pages.find(p =>
-      p.url().includes("accounts.google.com")
-    );
-
-    if (!googlePage) {
-      throw new Error(
-        "Página oficial do Google não foi aberta."
-      );
-    }
-
-    const googleURL = googlePage.url();
-
-    const sessionId = crypto.randomUUID();
-
-    const timer = setTimeout(() => {
-      closeSession(sessionId);
-    }, SESSION_TTL);
-
-    sessions.set(sessionId, {
-      browser,
-      quizitPage: page,
-      googlePage,
-      createdAt: Date.now(),
-      timer
-    });
-
-    // browser agora pertence à sessão
-    browser = null;
-
-    return res.json({
-      success: true,
-
-      sessionId,
-
-      googleDetected: true,
-
-      googleHost: "accounts.google.com",
-
-      // Só para diagnóstico.
-      // Não significa que abrir esta URL em outro
-      // navegador transfira a sessão para o Puppeteer.
-      googleURL,
-
-      expiresInSeconds: 600,
-
-      message:
-        "Fluxo Google iniciado no navegador do servidor."
-    });
-
-  } catch (error) {
-    if (browser) {
+    page.on("response", async (response) => {
       try {
-        await browser.close();
-      } catch {}
-    }
+        const responseUrl = response.url();
 
-    return res.status(500).json({
-      success: false,
-      error: error.message
+        const request = response.request();
+
+        const resourceType =
+          request.resourceType();
+
+        const headers =
+          response.headers();
+
+        const contentType =
+          headers["content-type"] || "";
+
+        // Guarda XHR / Fetch e requisições relacionadas ao Wayground
+        if (
+          resourceType !== "xhr" &&
+          resourceType !== "fetch" &&
+          !responseUrl.includes("wayground")
+        ) {
+          return;
+        }
+
+        responses.push({
+          status: response.status(),
+          type: resourceType,
+          url: responseUrl,
+          contentType
+        });
+
+        // ==============================
+        // PROCURA JSON
+        // ==============================
+
+        if (
+          contentType.includes("application/json") ||
+          contentType.includes("text/json")
+        ) {
+          try {
+            const json =
+              await response.json();
+
+            const text =
+              JSON.stringify(json);
+
+            const interesting =
+              /question|quiz|option|answer|slide|mcq|assessment/i.test(
+                text
+              );
+
+            if (interesting) {
+              possibleData.push({
+                url: responseUrl,
+                status: response.status(),
+                data: json
+              });
+            }
+
+          } catch {
+            // Ignora respostas que não puderem ser lidas
+          }
+        }
+
+      } catch {
+        // Uma resposta individual não derruba a rota
+      }
     });
-  }
-});
 
-// ===============================
-// VER ESTADO DA SESSÃO
-// ===============================
+    // ==============================
+    // ABRE ATIVIDADE
+    // ==============================
 
-app.get("/quizit/google/status/:sessionId", async (req, res) => {
-  const { sessionId } = req.params;
-
-  const session = sessions.get(sessionId);
-
-  if (!session) {
-    return res.status(404).json({
-      success: false,
-      error: "Sessão inexistente ou expirada."
+    await page.goto(url, {
+      waitUntil: "domcontentloaded",
+      timeout: 60000
     });
-  }
 
-  try {
-    const pages = await session.browser.pages();
+    // Aguarda aplicação carregar
+    await new Promise((resolve) =>
+      setTimeout(resolve, 10000)
+    );
 
-    const info = [];
+    // ==============================
+    // ANALISA DOM
+    // ==============================
 
-    for (const page of pages) {
-      info.push({
-        url: page.url(),
-        title: await page
-          .title()
-          .catch(() => "")
+    const pageInfo =
+      await page.evaluate(() => {
+
+        const bodyText =
+          document.body?.innerText || "";
+
+        const scripts =
+          [...document.scripts]
+            .map(
+              (script) =>
+                script.textContent || ""
+            )
+            .filter(Boolean);
+
+        const interestingScripts =
+          scripts
+            .filter((text) =>
+              /question|quiz|option|answer|slide|mcq|assessment/i.test(
+                text
+              )
+            )
+            .slice(0, 10)
+            .map((text) =>
+              text.slice(0, 15000)
+            );
+
+        // Textos de elementos da página
+        const elements =
+          [...document.querySelectorAll(
+            "h1,h2,h3,h4,p,button,label,[role='button']"
+          )]
+            .map((el) =>
+              el.innerText?.trim()
+            )
+            .filter(Boolean)
+            .slice(0, 500);
+
+        return {
+          title:
+            document.title,
+
+          url:
+            location.href,
+
+          bodyText:
+            bodyText.slice(
+              0,
+              30000
+            ),
+
+          bodyLength:
+            bodyText.length,
+
+          htmlLength:
+            document.documentElement
+              ?.outerHTML
+              ?.length || 0,
+
+          scriptCount:
+            document.scripts.length,
+
+          elements,
+
+          interestingScripts
+        };
       });
-    }
 
-    const quizitAuthenticated =
-      info.some(p =>
-        p.url.includes("quizit.online") &&
-        !p.url.includes("/auth/login")
-      );
+    // ==============================
+    // RESULTADO
+    // ==============================
 
     return res.json({
       success: true,
 
-      sessionId,
+      finalUrl:
+        page.url(),
 
-      quizitAuthenticated,
+      page:
+        pageInfo,
 
-      pages: info,
+      network: {
+        totalCaptured:
+          responses.length,
 
-      ageSeconds:
-        Math.floor(
-          (Date.now() - session.createdAt) / 1000
+        responses:
+          responses.slice(
+            0,
+            150
+          )
+      },
+
+      possibleData:
+        possibleData.slice(
+          0,
+          30
         )
     });
 
   } catch (error) {
+
+    console.error(
+      "Wayground inspect error:",
+      error
+    );
+
     return res.status(500).json({
       success: false,
       error: error.message
     });
+
+  } finally {
+
+    if (browser) {
+      await browser
+        .close()
+        .catch(() => {});
+    }
   }
 });
 
-// ===============================
-// ENCERRAR MANUALMENTE
-// ===============================
+// ==============================
+// 404
+// ==============================
 
-app.post("/quizit/google/close", async (req, res) => {
-  const sessionId =
-    String(req.body?.sessionId || "");
-
-  if (!sessions.has(sessionId)) {
-    return res.status(404).json({
-      success: false,
-      error: "Sessão inexistente."
-    });
-  }
-
-  await closeSession(sessionId);
-
-  return res.json({
-    success: true,
-    message: "Sessão encerrada."
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    error: "Rota não encontrada"
   });
 });
 
-// ===============================
-// SERVER
-// ===============================
+// ==============================
+// SERVIDOR
+// ==============================
 
 const PORT =
   process.env.PORT || 3000;
 
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log(
     `Xantoss Puppeteer rodando na porta ${PORT}`
   );
