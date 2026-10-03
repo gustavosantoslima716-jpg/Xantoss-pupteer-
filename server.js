@@ -2,7 +2,32 @@ import express from "express";
 import puppeteer from "puppeteer";
 
 const app = express();
+
 app.use(express.json());
+
+// CORS para permitir o teste pelo Hoppscotch
+app.use((req, res, next) => {
+  res.header(
+    "Access-Control-Allow-Origin",
+    "https://hoppscotch.io"
+  );
+
+  res.header(
+    "Access-Control-Allow-Headers",
+    "Content-Type"
+  );
+
+  res.header(
+    "Access-Control-Allow-Methods",
+    "GET, POST, OPTIONS"
+  );
+
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
+  }
+
+  next();
+});
 
 app.get("/", (req, res) => {
   res.json({
@@ -26,7 +51,10 @@ app.post("/wayground-test", async (req, res) => {
   try {
     browser = await puppeteer.launch({
       headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"]
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox"
+      ]
     });
 
     const page = await browser.newPage();
@@ -36,77 +64,111 @@ app.post("/wayground-test", async (req, res) => {
       height: 900
     });
 
-    await page.goto("https://quizit.online/services/wayground", {
-      waitUntil: "networkidle2",
-      timeout: 60000
-    });
+    await page.goto(
+      "https://quizit.online/services/wayground",
+      {
+        waitUntil: "networkidle2",
+        timeout: 60000
+      }
+    );
 
-    // Preenche o link
-    const input = await page.$('input[placeholder="Enter pin or link"]');
+    // Localiza o campo do link
+    const input = await page.$(
+      'input[placeholder="Enter pin or link"]'
+    );
 
     if (!input) {
-      throw new Error("Campo de link não encontrado.");
+      throw new Error(
+        "Campo de link não encontrado."
+      );
     }
 
+    // Coloca o link da atividade
     await input.click();
     await input.type(link);
 
-    // Procura elementos clicáveis pelo texto visível
+    // Clica em um elemento pelo texto visível
     async function clickText(text) {
-      const encontrou = await page.evaluate((texto) => {
-        const elementos = [...document.querySelectorAll("*")];
+      return await page.evaluate((texto) => {
+        const elementos =
+          [...document.querySelectorAll("*")];
 
-        const alvo = elementos.find(el => {
-          const t = el.textContent?.trim();
+        const alvo = elementos.find((el) => {
+          const conteudo =
+            el.textContent?.trim();
+
           const visivel =
             el.offsetWidth > 0 &&
             el.offsetHeight > 0;
 
-          return t === texto && visivel;
+          return (
+            conteudo === texto &&
+            visivel
+          );
         });
 
-        if (!alvo) return false;
+        if (!alvo) {
+          return false;
+        }
 
         alvo.click();
+
         return true;
       }, text);
-
-      return encontrou;
     }
 
-    // Abre o seletor "Standard"
-    const abriuMetodo = await clickText("Standard");
+    // Abre o seletor de método
+    const abriuMetodo =
+      await clickText("Standard");
 
     if (!abriuMetodo) {
-      throw new Error("Seletor de método não encontrado.");
+      throw new Error(
+        "Seletor de método não encontrado."
+      );
     }
 
-    await new Promise(r => setTimeout(r, 700));
+    await new Promise((resolve) =>
+      setTimeout(resolve, 700)
+    );
 
     // Seleciona Undetectable
-    const selecionou = await clickText("Undetectable");
+    const selecionou =
+      await clickText("Undetectable");
 
     if (!selecionou) {
-      throw new Error("Opção Undetectable não encontrada.");
+      throw new Error(
+        "Opção Undetectable não encontrada."
+      );
     }
 
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise((resolve) =>
+      setTimeout(resolve, 500)
+    );
 
-    // Clica em Get answers
-    const enviou = await clickText("Get answers");
+    // Envia
+    const enviou =
+      await clickText("Get answers");
 
     if (!enviou) {
-      throw new Error("Botão Get answers não encontrado.");
+      throw new Error(
+        "Botão Get answers não encontrado."
+      );
     }
 
-    // Espera a navegação/processamento
-    await new Promise(r => setTimeout(r, 12000));
+    // Aguarda o processamento
+    await new Promise((resolve) =>
+      setTimeout(resolve, 12000)
+    );
 
+    // Lê apenas o conteúdo que ficou disponível
+    // normalmente na página.
     const resultado = await page.evaluate(() => {
-      const texto = document.body.innerText;
+      const texto =
+        document.body.innerText || "";
 
       return {
         urlFinal: location.href,
+
         title: document.title,
 
         encontrouSolutions:
@@ -121,7 +183,8 @@ app.post("/wayground-test", async (req, res) => {
         encontrouUnlock:
           texto.includes("Unlock answer"),
 
-        textoPagina: texto.slice(0, 12000)
+        textoPagina:
+          texto.slice(0, 12000)
       };
     });
 
@@ -131,18 +194,25 @@ app.post("/wayground-test", async (req, res) => {
     });
 
   } catch (error) {
+    console.error(error);
+
     res.status(500).json({
       success: false,
       error: error.message
     });
 
   } finally {
-    if (browser) await browser.close();
+    if (browser) {
+      await browser.close();
+    }
   }
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT =
+  process.env.PORT || 3000;
 
 app.listen(PORT, () => {
-  console.log(`Xantoss Puppeteer rodando na porta ${PORT}`);
+  console.log(
+    `Xantoss Puppeteer rodando na porta ${PORT}`
+  );
 });
