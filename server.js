@@ -5,7 +5,7 @@ const app = express();
 
 app.use(express.json());
 
-// CORS para permitir o teste pelo Hoppscotch
+// CORS para o teste pelo Hoppscotch
 app.use((req, res, next) => {
   res.header(
     "Access-Control-Allow-Origin",
@@ -72,7 +72,10 @@ app.post("/wayground-test", async (req, res) => {
       }
     );
 
-    // Localiza o campo do link
+    // =========================
+    // 1. CAMPO DO LINK
+    // =========================
+
     const input = await page.$(
       'input[placeholder="Enter pin or link"]'
     );
@@ -83,17 +86,19 @@ app.post("/wayground-test", async (req, res) => {
       );
     }
 
-    // Coloca o link da atividade
     await input.click();
     await input.type(link);
 
-    // Clica em um elemento pelo texto visível
-    async function clickText(text) {
+    // =========================
+    // FUNÇÃO: CLICAR POR TEXTO
+    // =========================
+
+    async function clickExactText(text) {
       return await page.evaluate((texto) => {
         const elementos =
           [...document.querySelectorAll("*")];
 
-        const alvo = elementos.find((el) => {
+        const candidatos = elementos.filter((el) => {
           const conteudo =
             el.textContent?.trim();
 
@@ -107,6 +112,15 @@ app.post("/wayground-test", async (req, res) => {
           );
         });
 
+        // Prefere elemento clicável
+        const alvo =
+          candidatos.find((el) =>
+            el.matches(
+              "button, [role='button'], [role='option']"
+            )
+          ) ||
+          candidatos[candidatos.length - 1];
+
         if (!alvo) {
           return false;
         }
@@ -117,37 +131,99 @@ app.post("/wayground-test", async (req, res) => {
       }, text);
     }
 
-    // Abre o seletor de método
+    // =========================
+    // 2. ABRIR ANSWER METHOD
+    // =========================
+
     const abriuMetodo =
-      await clickText("Standard");
+      await clickExactText("Standard");
 
     if (!abriuMetodo) {
       throw new Error(
-        "Seletor de método não encontrado."
+        "Não foi possível abrir o seletor Standard."
       );
     }
 
     await new Promise((resolve) =>
-      setTimeout(resolve, 700)
+      setTimeout(resolve, 1000)
     );
 
-    // Seleciona Undetectable
-    const selecionou =
-      await clickText("Undetectable");
+    // =========================
+    // 3. UNDETECTABLE (NO BOT)
+    // =========================
 
-    if (!selecionou) {
+    const selecionouUndetectable =
+      await page.evaluate(() => {
+        const elementos =
+          [...document.querySelectorAll("*")];
+
+        const candidatos =
+          elementos.filter((el) => {
+            const texto =
+              el.textContent
+                ?.trim()
+                .replace(/\s+/g, " ");
+
+            const visivel =
+              el.offsetWidth > 0 &&
+              el.offsetHeight > 0;
+
+            return (
+              visivel &&
+              texto?.startsWith(
+                "Undetectable"
+              )
+            );
+          });
+
+        // Tenta encontrar o elemento mais específico
+        const alvo =
+          candidatos.find((el) =>
+            el.matches(
+              "[role='option'], button, [role='button']"
+            )
+          ) ||
+          candidatos[candidatos.length - 1];
+
+        if (!alvo) {
+          return false;
+        }
+
+        alvo.click();
+
+        return true;
+      });
+
+    if (!selecionouUndetectable) {
       throw new Error(
-        "Opção Undetectable não encontrada."
+        "Opção Undetectable (no bot) não encontrada."
       );
     }
 
     await new Promise((resolve) =>
-      setTimeout(resolve, 500)
+      setTimeout(resolve, 1000)
     );
 
-    // Envia
+    // =========================
+    // 4. CONFIRMA SE MUDOU
+    // =========================
+
+    const metodoSelecionado =
+      await page.evaluate(() => {
+        const texto =
+          document.body.innerText || "";
+
+        return texto.includes(
+          "Undetectable (no bot)"
+        );
+      });
+
+    // =========================
+    // 5. GET ANSWERS
+    // =========================
+
     const enviou =
-      await clickText("Get answers");
+      await clickExactText("Get answers");
 
     if (!enviou) {
       throw new Error(
@@ -155,48 +231,58 @@ app.post("/wayground-test", async (req, res) => {
       );
     }
 
-    // Aguarda o processamento
+    // Dá tempo para o Quizit processar
     await new Promise((resolve) =>
-      setTimeout(resolve, 12000)
+      setTimeout(resolve, 15000)
     );
 
-    // Lê apenas o conteúdo que ficou disponível
-    // normalmente na página.
-    const resultado = await page.evaluate(() => {
-      const texto =
-        document.body.innerText || "";
+    // =========================
+    // 6. LER RESULTADO VISÍVEL
+    // =========================
 
-      return {
-        urlFinal: location.href,
+    const resultado =
+      await page.evaluate(() => {
+        const texto =
+          document.body.innerText || "";
 
-        title: document.title,
+        return {
+          urlFinal: location.href,
 
-        encontrouSolutions:
-          texto.includes("Your solutions"),
+          title: document.title,
 
-        encontrouMCQ:
-          texto.includes("MCQ"),
+          encontrouSolutions:
+            texto.includes(
+              "Your solutions"
+            ),
 
-        encontrouSlide:
-          texto.includes("SLIDEV2"),
+          encontrouMCQ:
+            texto.includes("MCQ"),
 
-        encontrouUnlock:
-          texto.includes("Unlock answer"),
+          encontrouSlide:
+            texto.includes("SLIDEV2"),
 
-        textoPagina:
-          texto.slice(0, 12000)
-      };
-    });
+          encontrouUnlock:
+            texto.includes(
+              "Unlock answer"
+            ),
 
-    res.json({
+          textoPagina:
+            texto.slice(0, 15000)
+        };
+      });
+
+    return res.json({
       success: true,
+
+      metodoSelecionado,
+
       ...resultado
     });
 
   } catch (error) {
     console.error(error);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       error: error.message
     });
