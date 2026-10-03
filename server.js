@@ -10,12 +10,23 @@ app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  if (req.method === "OPTIONS") {
-    return res.sendStatus(204);
-  }
-
+  if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
+
+const sleep = (ms) =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+async function launchBrowser() {
+  return puppeteer.launch({
+    headless: true,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage"
+    ]
+  });
+}
 
 // ========================================
 // HOME
@@ -25,26 +36,23 @@ app.get("/", (req, res) => {
   res.json({
     success: true,
     service: "Xantoss Puppeteer",
-    status: "online"
+    status: "online",
+    waygroundCredentialsConfigured: Boolean(
+      process.env.WAYGROUND_EMAIL &&
+      process.env.WAYGROUND_PASSWORD
+    )
   });
 });
 
 // ========================================
-// TESTE DO CHROMIUM
+// BROWSER TEST
 // ========================================
 
 app.get("/browser-test", async (req, res) => {
   let browser;
 
   try {
-    browser = await puppeteer.launch({
-      headless: true,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage"
-      ]
-    });
+    browser = await launchBrowser();
 
     const page = await browser.newPage();
 
@@ -53,13 +61,13 @@ app.get("/browser-test", async (req, res) => {
       timeout: 30000
     });
 
-    res.json({
+    return res.json({
       success: true,
       chromium: "Funcionando",
       title: await page.title()
     });
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       error: error.message
     });
@@ -71,11 +79,21 @@ app.get("/browser-test", async (req, res) => {
 });
 
 // ========================================
-// WAYGROUND INSPECT
+// LOGIN + INSPEÇÃO WAYGROUND
 // ========================================
 
-app.post("/wayground/inspect", async (req, res) => {
+app.post("/wayground/login-inspect", async (req, res) => {
   const { url } = req.body || {};
+
+  const email = process.env.WAYGROUND_EMAIL;
+  const password = process.env.WAYGROUND_PASSWORD;
+
+  if (!email || !password) {
+    return res.status(500).json({
+      success: false,
+      error: "WAYGROUND_EMAIL ou WAYGROUND_PASSWORD não configurado"
+    });
+  }
 
   if (!url) {
     return res.status(400).json({
@@ -108,14 +126,7 @@ app.post("/wayground/inspect", async (req, res) => {
   let browser;
 
   try {
-    browser = await puppeteer.launch({
-      headless: true,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage"
-      ]
-    });
+    browser = await launchBrowser();
 
     const page = await browser.newPage();
 
@@ -130,35 +141,256 @@ app.post("/wayground/inspect", async (req, res) => {
       "Chrome/140.0.0.0 Safari/537.36"
     );
 
-    const networkResponses = [];
-    const jsonResponses = [];
+    // ========================================
+    // 1. ABRE LOGIN
+    // ========================================
+
+    await page.goto(
+      "https://wayground.com/login",
+      {
+        waitUntil: "domcontentloaded",
+        timeout: 60000
+      }
+    );
+
+    await sleep(3000);
 
     // ========================================
-    // CAPTURA RESPOSTAS
+    // 2. CLICA "CONTINUAR COM EMAIL"
     // ========================================
+
+    const clickedEmail = await page.evaluate(() => {
+      const candidates = [
+        ...document.querySelectorAll(
+          "button,a,[role='button']"
+        )
+      ];
+
+      const target = candidates.find((el) => {
+        const text =
+          (el.innerText || el.textContent || "")
+            .trim()
+            .toLowerCase();
+
+        return (
+          text.includes("continue with email") ||
+          text.includes("continuar com email")
+        );
+      });
+
+      if (!target) return false;
+
+      target.click();
+      return true;
+    });
+
+    if (!clickedEmail) {
+      return res.status(500).json({
+        success: false,
+        step: "open-email-login",
+        error: "Botão Continuar com Email não encontrado",
+        currentUrl: page.url()
+      });
+    }
+
+    await sleep(2500);
+
+    // ========================================
+    // 3. DIGITA EMAIL
+    // ========================================
+
+    const emailInput = await page.$(
+      'input[type="email"], input[name="email"], input[autocomplete="email"], input[type="text"]'
+    );
+
+    if (!emailInput) {
+      return res.status(500).json({
+        success: false,
+        step: "email",
+        error: "Campo de email não encontrado",
+        currentUrl: page.url()
+      });
+    }
+
+    await emailInput.click({ clickCount: 3 });
+    await emailInput.type(email, {
+      delay: 25
+    });
+
+    // Procura botão para avançar
+    const advanced = await page.evaluate(() => {
+      const buttons = [
+        ...document.querySelectorAll(
+          "button,[role='button']"
+        )
+      ];
+
+      const target = buttons.find((el) => {
+        const text =
+          (el.innerText || el.textContent || "")
+            .trim()
+            .toLowerCase();
+
+        return (
+          text.includes("continue") ||
+          text.includes("continuar") ||
+          text.includes("next") ||
+          text.includes("próximo")
+        );
+      });
+
+      if (!target) return false;
+
+      target.click();
+      return true;
+    });
+
+    if (!advanced) {
+      // Alguns formulários avançam com Enter
+      await emailInput.press("Enter");
+    }
+
+    await sleep(3000);
+
+    // ========================================
+    // 4. PROCURA CAMPO DE SENHA
+    // ========================================
+
+    let passwordInput =
+      await page.$('input[type="password"]');
+
+    // Às vezes email e senha já aparecem juntos
+    if (!passwordInput) {
+      await sleep(2000);
+
+      passwordInput =
+        await page.$('input[type="password"]');
+    }
+
+    if (!passwordInput) {
+      return res.status(500).json({
+        success: false,
+        step: "password",
+        error: "Campo de senha não encontrado",
+        currentUrl: page.url(),
+        title: await page.title()
+      });
+    }
+
+    await passwordInput.click({
+      clickCount: 3
+    });
+
+    await passwordInput.type(password, {
+      delay: 25
+    });
+
+    // ========================================
+    // 5. ENVIA LOGIN
+    // ========================================
+
+    const submitted = await page.evaluate(() => {
+      const buttons = [
+        ...document.querySelectorAll(
+          "button,[role='button']"
+        )
+      ];
+
+      const target = buttons.find((el) => {
+        const text =
+          (el.innerText || el.textContent || "")
+            .trim()
+            .toLowerCase();
+
+        return (
+          text === "continue" ||
+          text === "continuar" ||
+          text === "login" ||
+          text === "log in" ||
+          text === "entrar"
+        );
+      });
+
+      if (!target) return false;
+
+      target.click();
+      return true;
+    });
+
+    if (!submitted) {
+      await passwordInput.press("Enter");
+    }
+
+    await sleep(6000);
+
+    // ========================================
+    // 6. CONFIRMA LOGIN
+    // ========================================
+
+    const authCheck = await page.evaluate(async () => {
+      try {
+        const response = await fetch(
+          "/_api/main/user?subscriptionData=true",
+          {
+            credentials: "include"
+          }
+        );
+
+        return {
+          status: response.status,
+          ok: response.ok
+        };
+      } catch (error) {
+        return {
+          status: 0,
+          ok: false,
+          error: error.message
+        };
+      }
+    });
+
+    if (!authCheck.ok) {
+      const visibleText = await page.evaluate(() =>
+        (document.body?.innerText || "")
+          .slice(0, 2000)
+      );
+
+      return res.status(401).json({
+        success: false,
+        step: "auth-check",
+        error: "Wayground não confirmou a sessão",
+        authStatus: authCheck.status,
+        currentUrl: page.url(),
+        pageText: visibleText
+      });
+    }
+
+    // ========================================
+    // LOGIN FUNCIONOU
+    // COMEÇA CAPTURA DA ATIVIDADE
+    // ========================================
+
+    const networkResponses = [];
+    const jsonResponses = [];
 
     page.on("response", async (response) => {
       try {
         const request = response.request();
 
         const responseUrl = response.url();
-        const type = request.resourceType();
         const status = response.status();
+        const type = request.resourceType();
 
-        const headers = response.headers();
-        const contentType = headers["content-type"] || "";
+        const contentType =
+          response.headers()["content-type"] || "";
 
-        // Só interessa rede relacionada ao app/API
         const interesting =
           type === "xhr" ||
           type === "fetch" ||
           responseUrl.includes("_gameapi") ||
-          responseUrl.includes("/_api/") ||
           responseUrl.includes("play-api");
 
-        if (!interesting) {
-          return;
-        }
+        if (!interesting) return;
 
         networkResponses.push({
           status,
@@ -167,10 +399,6 @@ app.post("/wayground/inspect", async (req, res) => {
           url: responseUrl,
           contentType
         });
-
-        // ========================================
-        // TENTA LER CORPO JSON
-        // ========================================
 
         if (
           contentType.includes("application/json") ||
@@ -184,7 +412,7 @@ app.post("/wayground/inspect", async (req, res) => {
             try {
               body = JSON.parse(text);
             } catch {
-              body = text.slice(0, 20000);
+              body = text.slice(0, 30000);
             }
 
             jsonResponses.push({
@@ -192,30 +420,19 @@ app.post("/wayground/inspect", async (req, res) => {
               method: request.method(),
               type,
               url: responseUrl,
-
-              // Não retornamos headers/cookies/tokens.
               body
             });
-          } catch (error) {
-            jsonResponses.push({
-              status,
-              method: request.method(),
-              type,
-              url: responseUrl,
-              readError: error.message
-            });
+          } catch {
+            // ignora resposta não legível
           }
         }
-      } catch (error) {
-        console.log(
-          "Erro ao analisar response:",
-          error.message
-        );
+      } catch {
+        // não derruba o teste
       }
     });
 
     // ========================================
-    // ABRE WAYGROUND
+    // 7. ABRE ATIVIDADE LOGADO
     // ========================================
 
     await page.goto(url, {
@@ -223,54 +440,45 @@ app.post("/wayground/inspect", async (req, res) => {
       timeout: 60000
     });
 
-    await new Promise((resolve) => {
-      setTimeout(resolve, 12000);
-    });
+    await sleep(12000);
 
-    // ========================================
-    // INFORMAÇÕES DA PÁGINA
-    // ========================================
+    const pageInfo = await page.evaluate(() => ({
+      title: document.title,
+      url: location.href,
+      bodyText:
+        (document.body?.innerText || "")
+          .slice(0, 10000)
+    }));
 
-    const pageInfo = await page.evaluate(() => {
-      const text = document.body?.innerText || "";
+    const importantResponses =
+      jsonResponses.filter((item) => {
+        const text = JSON.stringify(item.body);
 
-      return {
-        title: document.title,
-        url: location.href,
-        bodyText: text.slice(0, 10000),
-        bodyLength: text.length,
-        htmlLength:
-          document.documentElement?.outerHTML?.length || 0
-      };
-    });
-
-    // ========================================
-    // DESTACA RESPOSTAS IMPORTANTES
-    // ========================================
-
-    const importantResponses = jsonResponses.filter((item) => {
-      return (
-        item.status >= 400 ||
-        item.url.includes("/rejoin") ||
-        item.url.includes("_gameapi") ||
-        item.url.includes("/_api/main/user")
-      );
-    });
-
-    // ========================================
-    // RESULTADO
-    // ========================================
+        return (
+          item.url.includes("_gameapi") ||
+          item.url.includes("/rejoin") ||
+          /question|options|quiz|slide|assessment|game/i.test(
+            text
+          )
+        );
+      });
 
     return res.json({
       success: true,
 
-      finalUrl: page.url(),
+      login: {
+        authenticated: true,
+        authStatus: authCheck.status
+      },
 
-      page: pageInfo,
+      activity: pageInfo,
 
       diagnostic: {
-        networkCount: networkResponses.length,
-        jsonCount: jsonResponses.length,
+        networkCount:
+          networkResponses.length,
+
+        jsonCount:
+          jsonResponses.length,
 
         importantResponses:
           importantResponses.slice(0, 30)
@@ -282,10 +490,11 @@ app.post("/wayground/inspect", async (req, res) => {
       jsonResponses:
         jsonResponses.slice(0, 50)
     });
+
   } catch (error) {
     console.error(
-      "Wayground inspect error:",
-      error
+      "Wayground login inspect error:",
+      error.message
     );
 
     return res.status(500).json({
@@ -309,10 +518,6 @@ app.use((req, res) => {
     error: "Rota não encontrada"
   });
 });
-
-// ========================================
-// START
-// ========================================
 
 const PORT = process.env.PORT || 3000;
 
