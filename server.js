@@ -1,8 +1,39 @@
 import express from "express";
 import puppeteer from "puppeteer";
+import crypto from "crypto";
 
 const app = express();
 app.use(express.json());
+
+const sessions = new Map();
+
+const SESSION_TTL = 10 * 60 * 1000;
+
+// ===============================
+// CORS
+// ===============================
+
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header(
+    "Access-Control-Allow-Headers",
+    "Content-Type"
+  );
+  res.header(
+    "Access-Control-Allow-Methods",
+    "GET, POST, OPTIONS"
+  );
+
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
+  }
+
+  next();
+});
+
+// ===============================
+// HOME
+// ===============================
 
 app.get("/", (req, res) => {
   res.json({
@@ -11,12 +42,34 @@ app.get("/", (req, res) => {
   });
 });
 
-app.get("/google-test", async (req, res) => {
+// ===============================
+// FECHAR SESSÃO
+// ===============================
+
+async function closeSession(sessionId) {
+  const session = sessions.get(sessionId);
+
+  if (!session) return;
+
+  sessions.delete(sessionId);
+
+  try {
+    clearTimeout(session.timer);
+    await session.browser.close();
+  } catch {}
+}
+
+// ===============================
+// INICIAR LOGIN GOOGLE
+// ===============================
+
+app.post("/quizit/google/start", async (req, res) => {
   let browser;
 
   try {
     browser = await puppeteer.launch({
       headless: true,
+
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
@@ -31,7 +84,7 @@ app.get("/google-test", async (req, res) => {
       height: 900
     });
 
-    // Abre diretamente o login do Quizit
+    // Abre login do Quizit
     await page.goto(
       "https://quizit.online/auth/login?next=/services/wayground",
       {
@@ -40,75 +93,155 @@ app.get("/google-test", async (req, res) => {
       }
     );
 
-    // Procura "Log in with Google"
-    const encontrouGoogle = await page.evaluate(() => {
-      const elementos = [
+    // Procura botão Google
+    const clicked = await page.evaluate(() => {
+      const elements = [
         ...document.querySelectorAll(
           "button, a, [role='button']"
         )
       ];
 
-      const alvo = elementos.find(el =>
+      const googleButton = elements.find(el =>
         (el.innerText || "")
           .trim()
           .toLowerCase()
           .includes("log in with google")
       );
 
-      if (!alvo) return false;
+      if (!googleButton) {
+        return false;
+      }
 
-      alvo.click();
+      googleButton.click();
+
       return true;
     });
 
-    if (!encontrouGoogle) {
+    if (!clicked) {
       throw new Error(
         'Botão "Log in with Google" não encontrado.'
       );
     }
 
-    // Espera o redirecionamento/popup
+    // Espera Google abrir
     await new Promise(resolve =>
-      setTimeout(resolve, 7000)
+      setTimeout(resolve, 4000)
     );
 
-    // Pode ter aberto uma nova aba/popup
     const pages = await browser.pages();
 
-    const paginas = [];
+    const googlePage = pages.find(p =>
+      p.url().includes("accounts.google.com")
+    );
 
-    for (const p of pages) {
-      paginas.push({
-        url: p.url(),
-        title: await p.title().catch(() => "")
-      });
+    if (!googlePage) {
+      throw new Error(
+        "Página oficial do Google não foi aberta."
+      );
     }
 
-    const paginaAtual =
-      pages[pages.length - 1];
+    const googleURL = googlePage.url();
 
-    const texto = await paginaAtual
-      .evaluate(() =>
-        document.body?.innerText?.slice(0, 2000) || ""
-      )
-      .catch(() => "");
+    const sessionId = crypto.randomUUID();
+
+    const timer = setTimeout(() => {
+      closeSession(sessionId);
+    }, SESSION_TTL);
+
+    sessions.set(sessionId, {
+      browser,
+      quizitPage: page,
+      googlePage,
+      createdAt: Date.now(),
+      timer
+    });
+
+    // browser agora pertence à sessão
+    browser = null;
 
     return res.json({
       success: true,
 
-      encontrouGoogle: true,
+      sessionId,
 
-      quantidadePaginas: pages.length,
+      googleDetected: true,
 
-      paginas,
+      googleHost: "accounts.google.com",
 
-      paginaFinal: {
-        url: paginaAtual.url(),
-        title: await paginaAtual
+      // Só para diagnóstico.
+      // Não significa que abrir esta URL em outro
+      // navegador transfira a sessão para o Puppeteer.
+      googleURL,
+
+      expiresInSeconds: 600,
+
+      message:
+        "Fluxo Google iniciado no navegador do servidor."
+    });
+
+  } catch (error) {
+    if (browser) {
+      try {
+        await browser.close();
+      } catch {}
+    }
+
+    return res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// ===============================
+// VER ESTADO DA SESSÃO
+// ===============================
+
+app.get("/quizit/google/status/:sessionId", async (req, res) => {
+  const { sessionId } = req.params;
+
+  const session = sessions.get(sessionId);
+
+  if (!session) {
+    return res.status(404).json({
+      success: false,
+      error: "Sessão inexistente ou expirada."
+    });
+  }
+
+  try {
+    const pages = await session.browser.pages();
+
+    const info = [];
+
+    for (const page of pages) {
+      info.push({
+        url: page.url(),
+        title: await page
           .title()
-          .catch(() => ""),
-        texto
-      }
+          .catch(() => "")
+      });
+    }
+
+    const quizitAuthenticated =
+      info.some(p =>
+        p.url.includes("quizit.online") &&
+        !p.url.includes("/auth/login")
+      );
+
+    return res.json({
+      success: true,
+
+      sessionId,
+
+      quizitAuthenticated,
+
+      pages: info,
+
+      ageSeconds:
+        Math.floor(
+          (Date.now() - session.createdAt) / 1000
+        )
     });
 
   } catch (error) {
@@ -116,13 +249,35 @@ app.get("/google-test", async (req, res) => {
       success: false,
       error: error.message
     });
-
-  } finally {
-    if (browser) {
-      await browser.close();
-    }
   }
 });
+
+// ===============================
+// ENCERRAR MANUALMENTE
+// ===============================
+
+app.post("/quizit/google/close", async (req, res) => {
+  const sessionId =
+    String(req.body?.sessionId || "");
+
+  if (!sessions.has(sessionId)) {
+    return res.status(404).json({
+      success: false,
+      error: "Sessão inexistente."
+    });
+  }
+
+  await closeSession(sessionId);
+
+  return res.json({
+    success: true,
+    message: "Sessão encerrada."
+  });
+});
+
+// ===============================
+// SERVER
+// ===============================
 
 const PORT =
   process.env.PORT || 3000;
