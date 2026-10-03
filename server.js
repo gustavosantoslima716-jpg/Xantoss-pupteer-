@@ -5,17 +5,10 @@ const app = express();
 
 app.use(express.json({ limit: "2mb" }));
 
-// CORS
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader(
-    "Access-Control-Allow-Methods",
-    "GET, POST, OPTIONS"
-  );
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Content-Type"
-  );
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
   if (req.method === "OPTIONS") {
     return res.sendStatus(204);
@@ -24,9 +17,9 @@ app.use((req, res, next) => {
   next();
 });
 
-// ==============================
+// ========================================
 // HOME
-// ==============================
+// ========================================
 
 app.get("/", (req, res) => {
   res.json({
@@ -36,9 +29,9 @@ app.get("/", (req, res) => {
   });
 });
 
-// ==============================
+// ========================================
 // TESTE DO CHROMIUM
-// ==============================
+// ========================================
 
 app.get("/browser-test", async (req, res) => {
   let browser;
@@ -60,22 +53,16 @@ app.get("/browser-test", async (req, res) => {
       timeout: 30000
     });
 
-    const title = await page.title();
-
-    return res.json({
+    res.json({
       success: true,
       chromium: "Funcionando",
-      title
+      title: await page.title()
     });
-
   } catch (error) {
-    console.error("Browser test error:", error);
-
-    return res.status(500).json({
+    res.status(500).json({
       success: false,
       error: error.message
     });
-
   } finally {
     if (browser) {
       await browser.close().catch(() => {});
@@ -83,9 +70,9 @@ app.get("/browser-test", async (req, res) => {
   }
 });
 
-// ==============================
+// ========================================
 // WAYGROUND INSPECT
-// ==============================
+// ========================================
 
 app.post("/wayground/inspect", async (req, res) => {
   const { url } = req.body || {};
@@ -108,7 +95,6 @@ app.post("/wayground/inspect", async (req, res) => {
     });
   }
 
-  // Permite somente Wayground
   if (
     parsed.hostname !== "wayground.com" &&
     !parsed.hostname.endsWith(".wayground.com")
@@ -124,7 +110,6 @@ app.post("/wayground/inspect", async (req, res) => {
   try {
     browser = await puppeteer.launch({
       headless: true,
-
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
@@ -139,207 +124,165 @@ app.post("/wayground/inspect", async (req, res) => {
       height: 768
     });
 
-    // User-Agent normal
     await page.setUserAgent(
       "Mozilla/5.0 (X11; Linux x86_64) " +
       "AppleWebKit/537.36 (KHTML, like Gecko) " +
       "Chrome/140.0.0.0 Safari/537.36"
     );
 
-    const responses = [];
-    const possibleData = [];
+    const networkResponses = [];
+    const jsonResponses = [];
 
-    // ==============================
-    // OBSERVA RESPOSTAS DE REDE
-    // ==============================
+    // ========================================
+    // CAPTURA RESPOSTAS
+    // ========================================
 
     page.on("response", async (response) => {
       try {
-        const responseUrl = response.url();
-
         const request = response.request();
 
-        const resourceType =
-          request.resourceType();
+        const responseUrl = response.url();
+        const type = request.resourceType();
+        const status = response.status();
 
-        const headers =
-          response.headers();
+        const headers = response.headers();
+        const contentType = headers["content-type"] || "";
 
-        const contentType =
-          headers["content-type"] || "";
+        // Só interessa rede relacionada ao app/API
+        const interesting =
+          type === "xhr" ||
+          type === "fetch" ||
+          responseUrl.includes("_gameapi") ||
+          responseUrl.includes("/_api/") ||
+          responseUrl.includes("play-api");
 
-        // Guarda XHR / Fetch e requisições relacionadas ao Wayground
-        if (
-          resourceType !== "xhr" &&
-          resourceType !== "fetch" &&
-          !responseUrl.includes("wayground")
-        ) {
+        if (!interesting) {
           return;
         }
 
-        responses.push({
-          status: response.status(),
-          type: resourceType,
+        networkResponses.push({
+          status,
+          method: request.method(),
+          type,
           url: responseUrl,
           contentType
         });
 
-        // ==============================
-        // PROCURA JSON
-        // ==============================
+        // ========================================
+        // TENTA LER CORPO JSON
+        // ========================================
 
         if (
           contentType.includes("application/json") ||
           contentType.includes("text/json")
         ) {
           try {
-            const json =
-              await response.json();
+            const text = await response.text();
 
-            const text =
-              JSON.stringify(json);
+            let body;
 
-            const interesting =
-              /question|quiz|option|answer|slide|mcq|assessment/i.test(
-                text
-              );
-
-            if (interesting) {
-              possibleData.push({
-                url: responseUrl,
-                status: response.status(),
-                data: json
-              });
+            try {
+              body = JSON.parse(text);
+            } catch {
+              body = text.slice(0, 20000);
             }
 
-          } catch {
-            // Ignora respostas que não puderem ser lidas
+            jsonResponses.push({
+              status,
+              method: request.method(),
+              type,
+              url: responseUrl,
+
+              // Não retornamos headers/cookies/tokens.
+              body
+            });
+          } catch (error) {
+            jsonResponses.push({
+              status,
+              method: request.method(),
+              type,
+              url: responseUrl,
+              readError: error.message
+            });
           }
         }
-
-      } catch {
-        // Uma resposta individual não derruba a rota
+      } catch (error) {
+        console.log(
+          "Erro ao analisar response:",
+          error.message
+        );
       }
     });
 
-    // ==============================
-    // ABRE ATIVIDADE
-    // ==============================
+    // ========================================
+    // ABRE WAYGROUND
+    // ========================================
 
     await page.goto(url, {
       waitUntil: "domcontentloaded",
       timeout: 60000
     });
 
-    // Aguarda aplicação carregar
-    await new Promise((resolve) =>
-      setTimeout(resolve, 10000)
-    );
+    await new Promise((resolve) => {
+      setTimeout(resolve, 12000);
+    });
 
-    // ==============================
-    // ANALISA DOM
-    // ==============================
+    // ========================================
+    // INFORMAÇÕES DA PÁGINA
+    // ========================================
 
-    const pageInfo =
-      await page.evaluate(() => {
+    const pageInfo = await page.evaluate(() => {
+      const text = document.body?.innerText || "";
 
-        const bodyText =
-          document.body?.innerText || "";
+      return {
+        title: document.title,
+        url: location.href,
+        bodyText: text.slice(0, 10000),
+        bodyLength: text.length,
+        htmlLength:
+          document.documentElement?.outerHTML?.length || 0
+      };
+    });
 
-        const scripts =
-          [...document.scripts]
-            .map(
-              (script) =>
-                script.textContent || ""
-            )
-            .filter(Boolean);
+    // ========================================
+    // DESTACA RESPOSTAS IMPORTANTES
+    // ========================================
 
-        const interestingScripts =
-          scripts
-            .filter((text) =>
-              /question|quiz|option|answer|slide|mcq|assessment/i.test(
-                text
-              )
-            )
-            .slice(0, 10)
-            .map((text) =>
-              text.slice(0, 15000)
-            );
+    const importantResponses = jsonResponses.filter((item) => {
+      return (
+        item.status >= 400 ||
+        item.url.includes("/rejoin") ||
+        item.url.includes("_gameapi") ||
+        item.url.includes("/_api/main/user")
+      );
+    });
 
-        // Textos de elementos da página
-        const elements =
-          [...document.querySelectorAll(
-            "h1,h2,h3,h4,p,button,label,[role='button']"
-          )]
-            .map((el) =>
-              el.innerText?.trim()
-            )
-            .filter(Boolean)
-            .slice(0, 500);
-
-        return {
-          title:
-            document.title,
-
-          url:
-            location.href,
-
-          bodyText:
-            bodyText.slice(
-              0,
-              30000
-            ),
-
-          bodyLength:
-            bodyText.length,
-
-          htmlLength:
-            document.documentElement
-              ?.outerHTML
-              ?.length || 0,
-
-          scriptCount:
-            document.scripts.length,
-
-          elements,
-
-          interestingScripts
-        };
-      });
-
-    // ==============================
+    // ========================================
     // RESULTADO
-    // ==============================
+    // ========================================
 
     return res.json({
       success: true,
 
-      finalUrl:
-        page.url(),
+      finalUrl: page.url(),
 
-      page:
-        pageInfo,
+      page: pageInfo,
 
-      network: {
-        totalCaptured:
-          responses.length,
+      diagnostic: {
+        networkCount: networkResponses.length,
+        jsonCount: jsonResponses.length,
 
-        responses:
-          responses.slice(
-            0,
-            150
-          )
+        importantResponses:
+          importantResponses.slice(0, 30)
       },
 
-      possibleData:
-        possibleData.slice(
-          0,
-          30
-        )
+      networkResponses:
+        networkResponses.slice(0, 100),
+
+      jsonResponses:
+        jsonResponses.slice(0, 50)
     });
-
   } catch (error) {
-
     console.error(
       "Wayground inspect error:",
       error
@@ -349,20 +292,16 @@ app.post("/wayground/inspect", async (req, res) => {
       success: false,
       error: error.message
     });
-
   } finally {
-
     if (browser) {
-      await browser
-        .close()
-        .catch(() => {});
+      await browser.close().catch(() => {});
     }
   }
 });
 
-// ==============================
+// ========================================
 // 404
-// ==============================
+// ========================================
 
 app.use((req, res) => {
   res.status(404).json({
@@ -371,12 +310,11 @@ app.use((req, res) => {
   });
 });
 
-// ==============================
-// SERVIDOR
-// ==============================
+// ========================================
+// START
+// ========================================
 
-const PORT =
-  process.env.PORT || 3000;
+const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(
